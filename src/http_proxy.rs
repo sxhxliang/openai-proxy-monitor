@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::Uri;
 use log::info;
 use pingora::prelude::{ProxyHttp, Session};
 use pingora_core::prelude::HttpPeer;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::from_slice;
 use tiktoken_rs::CoreBPE;
 
+use ai_api_converter::{anthropic_converter, utils::OpenAIStreamParser, AnthropicConverter, BaseConverter, ConversionResult, ConverterFactory};
 use crate::rate_limiter::SlidingWindowRateLimiter;
 
 const USER_RESOURCE: &str = "user";
@@ -333,6 +335,16 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         Ok(peer)
     }
 
+     /// Filters incoming requests
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> pingora_error::Result<bool> {
+
+        session
+            .req_header_mut()
+            .set_uri(Uri::from_static("/v1/chat/completions"));
+        println!("Modified request URI to /v1/chat/completions");
+        println!("Request Path: {:#?}", session.req_header().headers);
+        Ok(false)
+    }
     async fn request_body_filter(
         &self,
         session: &mut Session,
@@ -347,7 +359,38 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         if end_of_stream && session.req_header().method == "POST" {
             let path = session.req_header().uri.path();
             ctx.openai_request = Some(self.parse_request(&ctx.req_buffer, path)?);
+            
+
+            
+            let anthropic_converter = ConverterFactory::get_converter("anthropic").unwrap();
+
+            println!("Original request body: {}", String::from_utf8_lossy(&ctx.req_buffer));
+            let json_value: serde_json::Value = serde_json::from_slice(&ctx.req_buffer)
+                .map_err(|e| Error::explain(HTTPStatus(400), format!("Invalid JSON: {}", e)))?;
+            let res: Result<ConversionResult, ai_api_converter::ConversionError> = anthropic_converter
+                .convert_request(json_value, "openai", None).await;
+            // println!("Conversion result: {:#?}", res);
+            match res {
+                Ok(conversion_result) => {
+                    // println!("Converted request: {:?}", conversion_result.data);
+                    let json_str = serde_json::to_string(&conversion_result.data.unwrap())
+                        .map_err(|e| Error::explain(HTTPStatus(500), format!("JSON serialization error: {}", e)))?;
+                    println!("Converted JSON string: {}", json_str);
+                    
+                    session
+                        .req_header_mut()
+                        .insert_header("Content-Type", "application/json")?;
+                    session
+                        .req_header_mut()
+                        .insert_header("Content-Length", json_str.len().to_string())?;
+                    println!("session req header: {:#?}", session.req_header().headers);
+                    *body = Some(Bytes::from(json_str));
+                },
+                Err(_) => todo!(),
+            }
+
         }
+
 
         Ok(())
     }
@@ -395,7 +438,24 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
     ) -> pingora_error::Result<Option<Duration>> {
         if let Some(b) = body {
             ctx.resp_buffer.extend_from_slice(b);
+            println!("Response Body: {:#?}", String::from_utf8_lossy(b).to_string());
+            // let anthropic_converter = ConverterFactory::get_converter("anthropic").unwrap();
+        
+            // anthropic_converter.convert_response(data, source_format, target_format)
+            // let parser = OpenAIStreamParser::new();
+            // let line = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
+            
+            // let chunk = parser.parse_line(&String::from_utf8_lossy(b).to_string()).unwrap();
+            // println!("Parsed chunk: {:#?}", chunk);
+            // // let data = serde_json::to_value(&chunk).unwrap();
+            // let anthropic_converter = AnthropicConverter::new();
+            // let _ = anthropic_converter.set_original_model(chunk.model.unwrap().as_str());
+            // let res = anthropic_converter.convert_from_openai_streaming_chunk(data);
+            // // anthropic_converter.parse_anthropic_sse_event(sse_data)
+            
+            // println!("Response Conversion result: {:#?}", res);
         }
+
 
         if end_of_stream {
             if let Some(req) = &ctx.openai_request {
