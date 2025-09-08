@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{convert, sync::OnceLock};
 use std::time::Duration;
 
 use anyhow::Result as AnyResult;
@@ -439,21 +439,33 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         if let Some(b) = body {
             ctx.resp_buffer.extend_from_slice(b);
             println!("Response Body: {:#?}", String::from_utf8_lossy(b).to_string());
-            // let anthropic_converter = ConverterFactory::get_converter("anthropic").unwrap();
-        
-            // anthropic_converter.convert_response(data, source_format, target_format)
-            // let parser = OpenAIStreamParser::new();
-            // let line = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
-            
-            // let chunk = parser.parse_line(&String::from_utf8_lossy(b).to_string()).unwrap();
-            // println!("Parsed chunk: {:#?}", chunk);
-            // // let data = serde_json::to_value(&chunk).unwrap();
-            // let anthropic_converter = AnthropicConverter::new();
-            // let _ = anthropic_converter.set_original_model(chunk.model.unwrap().as_str());
-            // let res = anthropic_converter.convert_from_openai_streaming_chunk(data);
-            // // anthropic_converter.parse_anthropic_sse_event(sse_data)
-            
-            // println!("Response Conversion result: {:#?}", res);
+            let data = String::from_utf8_lossy(b).to_string();
+            let json_str = extract_json_from_sse(&data).unwrap();
+            let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+            // println!("Extracted JSON: {}", json_value);
+
+            // 你现在可以直接操作这个 Value 对象
+            if let Some(model) = json_value.get("model") {
+                // println!("\n提取到的 model 字段: {}", model);
+                let anthropic_converter = AnthropicConverter::new();
+                let _ = anthropic_converter.set_original_model(&model.to_string());
+                let res = anthropic_converter.convert_from_openai_streaming_chunk(json_value);
+
+                match res {
+                    Ok(convertion_result) => {
+                        println!("Converted response: {:?}", convertion_result);
+                        if let Some(data) = convertion_result.data {
+                            if let serde_json::Value::String(str_data) = data {
+                                println!("Converted JSON string:\n{}", str_data);
+                                *body = Some(Bytes::from(str_data));
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error during response conversion: {}", e);
+                    }
+                }
+            }
         }
 
 
@@ -501,4 +513,23 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
             status
         );
     }
+}
+
+fn extract_json_from_sse(sse_data: &str) -> Option<String> {
+    // 按事件分隔符 "\n\n" 分割字符串
+    for event in sse_data.split("\n\n") {
+        // 查找以 "data: " 开头的行
+        if let Some(line) = event.lines().find(|l| l.starts_with("data: ")) {
+            // 检查是否是 [DONE] 消息
+            if line.contains("[DONE]") {
+                continue;
+            }
+            // 提取 "data: " 后面的部分，并去除首尾空格
+            let json_str = line.strip_prefix("data: ").unwrap_or("");
+            if !json_str.is_empty() {
+                return Some(json_str.to_string());
+            }
+        }
+    }
+    None
 }
