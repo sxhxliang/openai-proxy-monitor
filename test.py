@@ -32,8 +32,24 @@ client = anthropic.Anthropic(
 
 with client.messages.stream(
     max_tokens=1024,
-    messages=[{"role": "user", "content": "Hello"}],
-    model="qwen2.5:1.5b",
+    # thinking={
+    #     "type": "enabled",
+    #     "budget_tokens": 16000
+    # },
+    tools=[
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5
+        }
+    ],
+    messages=[
+        {
+            "role": "user",
+            "content": "What is the weather like in New York City today?"
+        }
+    ],
+    model="deepseek-r1:1.5b",
 ) as stream:
   for text in stream.text_stream:
       print(text, end="", flush=True)

@@ -369,7 +369,7 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
                 .map_err(|e| Error::explain(HTTPStatus(400), format!("Invalid JSON: {}", e)))?;
             let res: Result<ConversionResult, ai_api_converter::ConversionError> = anthropic_converter
                 .convert_request(json_value, "openai", None).await;
-            // println!("Conversion result: {:#?}", res);
+            println!("Conversion result: {:#?}", res);
             match res {
                 Ok(conversion_result) => {
                     // println!("Converted request: {:?}", conversion_result.data);
