@@ -1,9 +1,10 @@
-use std::sync::OnceLock;
+use std::{convert, sync::OnceLock};
 use std::time::Duration;
 
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::Uri;
 use log::info;
 use pingora::prelude::{ProxyHttp, Session};
 use pingora_core::prelude::HttpPeer;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::from_slice;
 use tiktoken_rs::CoreBPE;
 
+use ai_api_converter::{anthropic_converter, utils::OpenAIStreamParser, AnthropicConverter, BaseConverter, ConversionResult, ConverterFactory};
 use crate::rate_limiter::SlidingWindowRateLimiter;
 use crate::utils::parse_request_via_path_and_header;
 const USER_RESOURCE: &str = "user";
@@ -333,6 +335,16 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         Ok(peer)
     }
 
+     /// Filters incoming requests
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> pingora_error::Result<bool> {
+
+        session
+            .req_header_mut()
+            .set_uri(Uri::from_static("/v1/chat/completions"));
+        println!("Modified request URI to /v1/chat/completions");
+        println!("Request Path: {:#?}", session.req_header().headers);
+        Ok(false)
+    }
     async fn request_body_filter(
         &self,
         session: &mut Session,
@@ -354,7 +366,38 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         if end_of_stream && session.req_header().method == "POST" {
             let path = session.req_header().uri.path();
             ctx.openai_request = Some(self.parse_request(&ctx.req_buffer, path)?);
+            
+
+            
+            let anthropic_converter = ConverterFactory::get_converter("anthropic").unwrap();
+
+            println!("Original request body: {}", String::from_utf8_lossy(&ctx.req_buffer));
+            let json_value: serde_json::Value = serde_json::from_slice(&ctx.req_buffer)
+                .map_err(|e| Error::explain(HTTPStatus(400), format!("Invalid JSON: {}", e)))?;
+            let res: Result<ConversionResult, ai_api_converter::ConversionError> = anthropic_converter
+                .convert_request(json_value, "openai", None).await;
+            // println!("Conversion result: {:#?}", res);
+            match res {
+                Ok(conversion_result) => {
+                    // println!("Converted request: {:?}", conversion_result.data);
+                    let json_str = serde_json::to_string(&conversion_result.data.unwrap())
+                        .map_err(|e| Error::explain(HTTPStatus(500), format!("JSON serialization error: {}", e)))?;
+                    println!("Converted JSON string: {}", json_str);
+                    
+                    session
+                        .req_header_mut()
+                        .insert_header("Content-Type", "application/json")?;
+                    session
+                        .req_header_mut()
+                        .insert_header("Content-Length", json_str.len().to_string())?;
+                    println!("session req header: {:#?}", session.req_header().headers);
+                    *body = Some(Bytes::from(json_str));
+                },
+                Err(_) => todo!(),
+            }
+
         }
+
 
         Ok(())
     }
@@ -402,7 +445,36 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
     ) -> pingora_error::Result<Option<Duration>> {
         if let Some(b) = body {
             ctx.resp_buffer.extend_from_slice(b);
+            println!("Response Body: {:#?}", String::from_utf8_lossy(b).to_string());
+            let data = String::from_utf8_lossy(b).to_string();
+            let json_str = extract_json_from_sse(&data).unwrap();
+            let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+            // println!("Extracted JSON: {}", json_value);
+
+            // 你现在可以直接操作这个 Value 对象
+            if let Some(model) = json_value.get("model") {
+                // println!("\n提取到的 model 字段: {}", model);
+                let anthropic_converter = AnthropicConverter::new();
+                let _ = anthropic_converter.set_original_model(&model.to_string());
+                let res = anthropic_converter.convert_from_openai_streaming_chunk(json_value);
+
+                match res {
+                    Ok(convertion_result) => {
+                        println!("Converted response: {:?}", convertion_result);
+                        if let Some(data) = convertion_result.data {
+                            if let serde_json::Value::String(str_data) = data {
+                                println!("Converted JSON string:\n{}", str_data);
+                                *body = Some(Bytes::from(str_data));
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error during response conversion: {}", e);
+                    }
+                }
+            }
         }
+
 
         if end_of_stream {
             if let Some(req) = &ctx.openai_request {
@@ -448,4 +520,23 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
             status
         );
     }
+}
+
+fn extract_json_from_sse(sse_data: &str) -> Option<String> {
+    // 按事件分隔符 "\n\n" 分割字符串
+    for event in sse_data.split("\n\n") {
+        // 查找以 "data: " 开头的行
+        if let Some(line) = event.lines().find(|l| l.starts_with("data: ")) {
+            // 检查是否是 [DONE] 消息
+            if line.contains("[DONE]") {
+                continue;
+            }
+            // 提取 "data: " 后面的部分，并去除首尾空格
+            let json_str = line.strip_prefix("data: ").unwrap_or("");
+            if !json_str.is_empty() {
+                return Some(json_str.to_string());
+            }
+        }
+    }
+    None
 }
