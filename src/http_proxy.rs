@@ -15,7 +15,7 @@ use serde_json::from_slice;
 use tiktoken_rs::CoreBPE;
 
 use crate::rate_limiter::SlidingWindowRateLimiter;
-
+use crate::utils::parse_request_via_path_and_header;
 const USER_RESOURCE: &str = "user";
 
 // Configurations
@@ -340,6 +340,13 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()> {
+        let res = parse_request_via_path_and_header(
+            session.req_header().uri.path(),
+            &session.req_header().headers,
+            body.as_ref().map(|b| std::str::from_utf8(b).unwrap_or(""))
+        );
+        println!("Parsed Request: {:?}", res);
+        
         if let Some(b) = body {
             ctx.req_buffer.extend_from_slice(b);
         }

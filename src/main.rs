@@ -10,6 +10,7 @@ use crate::rate_limiter::SlidingWindowRateLimiterEnum;
 
 mod http_proxy;
 mod rate_limiter;
+mod utils;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
