@@ -10,6 +10,17 @@ pub enum ApiService {
     Unknown,
 }
 
+impl ApiService {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApiService::Google => "google",
+            ApiService::OpenAI => "openai",
+            ApiService::Anthropic => "anthropic",
+            ApiService::Unknown => "unknown",
+        }
+    }
+}
+
 // 定义存储解析结果的结构体
 #[derive(Debug)]
 pub struct ApiRequest {

@@ -17,7 +17,7 @@ use tiktoken_rs::CoreBPE;
 
 use ai_api_converter::{anthropic_converter, utils::OpenAIStreamParser, AnthropicConverter, BaseConverter, ConversionResult, ConverterFactory};
 use crate::rate_limiter::SlidingWindowRateLimiter;
-use crate::utils::parse_request_via_path_and_header;
+use crate::utils::{parse_request_via_path_and_header, ApiService};
 const USER_RESOURCE: &str = "user";
 
 // Configurations
@@ -338,11 +338,11 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
      /// Filters incoming requests
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> pingora_error::Result<bool> {
 
-        session
-            .req_header_mut()
-            .set_uri(Uri::from_static("/v1/chat/completions"));
-        println!("Modified request URI to /v1/chat/completions");
-        println!("Request Path: {:#?}", session.req_header().headers);
+        // session
+        //     .req_header_mut()
+        //     .set_uri(Uri::from_static("/v1/chat/completions"));
+        // println!("Modified request URI to /v1/chat/completions");
+        println!("Origin Request Path: {:#?}", session.req_header().headers);
         Ok(false)
     }
     async fn request_body_filter(
@@ -369,7 +369,7 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
             
 
             
-            let anthropic_converter = ConverterFactory::get_converter("anthropic").unwrap();
+            let anthropic_converter = ConverterFactory::get_converter(res.service.as_str()).unwrap();
 
             println!("Original request body: {}", String::from_utf8_lossy(&ctx.req_buffer));
             let json_value: serde_json::Value = serde_json::from_slice(&ctx.req_buffer)
