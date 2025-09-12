@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::utils::ApiService;
+
 // Internal constant
 pub(super) const USER_RESOURCE: &str = "user";
 
@@ -16,6 +18,7 @@ pub struct Ctx {
     pub(super) resp_buffer: Vec<u8>,
     pub(super) openai_request: Option<OpenAIRequest>,
     pub(super) user: String,
+    pub(super) api_service: Option<ApiService>,
 }
 
 #[derive(Clone)]

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::Uri;
 use log::info;
 use pingora::prelude::{ProxyHttp, Session};
 use pingora_core::prelude::HttpPeer;
@@ -30,6 +31,7 @@ where
             resp_buffer: Vec::with_capacity(8192),
             openai_request: None,
             user: String::new(),
+            api_service: None,
         }
     }
 
@@ -49,9 +51,59 @@ where
     async fn request_filter(
         &self,
         session: &mut Session,
-        _: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> pingora_error::Result<bool> {
-        println!("Origin Request Path: {:#?}", session.req_header().headers);
+        // session
+        //     .req_header_mut()
+        //     .set_uri(Uri::from_static("/v1/chat/completions"));
+        session.enable_retry_buffering();
+        let request_body = session.read_request_body().await?;
+
+        let res = parse_request_via_path_and_header(
+            session.req_header().uri.path(),
+            &session.req_header().headers,
+            request_body.as_ref().map(|b| std::str::from_utf8(b).unwrap_or("")),
+        );
+        println!("Parsed Request: {:?}", res);
+        ctx.api_service = Some(res.service.clone());
+        match res.service {
+            crate::utils::ApiService::Anthropic => {
+                session
+                    .req_header_mut()
+                    .set_uri(Uri::from_static("/v1/chat/completions"));
+                session.req_header_mut().insert_header(
+                    "Authorization",
+                    format!("Bearer {}", res.api_key.unwrap_or("".to_string())),
+                );
+            }
+            crate::utils::ApiService::OpenAI => {
+                session
+                    .req_header_mut()
+                    .set_uri(Uri::from_static("/v1/chat/completions"));
+                session.req_header_mut().insert_header(
+                    "Authorization",
+                    format!("Bearer {}", res.api_key.unwrap_or("".to_string())),
+                );
+            }
+            crate::utils::ApiService::Google => {
+                session
+                    .req_header_mut()
+                    .set_uri(Uri::from_static("/v1/chat/completions"));
+                session.req_header_mut().insert_header(
+                    "Authorization",
+                    format!("Bearer {}", res.api_key.unwrap_or("".to_string())),
+                );
+            }
+            _ => {
+                return Err(Error::explain(
+                    HTTPStatus(400),
+                    "Unsupported API service",
+                ));
+            }
+            
+        }
+
+        println!("Origin Request Path: {:#?}", session.req_header());
         Ok(false)
     }
 
@@ -62,13 +114,9 @@ where
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()> {
-        let res = parse_request_via_path_and_header(
-            session.req_header().uri.path(),
-            &session.req_header().headers,
-            body.as_ref().map(|b| std::str::from_utf8(b).unwrap_or("")),
-        );
-        println!("Parsed Request: {:?}", res);
 
+
+        println!("Converted Request Path: {:#?}", session.req_header());
         if let Some(b) = body {
             ctx.req_buffer.extend_from_slice(b);
         }
@@ -78,8 +126,8 @@ where
             ctx.openai_request = Some(self.parse_request(&ctx.req_buffer, path)?);
 
             let anthropic_converter =
-                ConverterFactory::get_converter(res.service.as_str()).unwrap();
-
+                ConverterFactory::get_converter(ctx.api_service.clone().unwrap().as_str()).unwrap();
+            println!("Using converter for service: {}", anthropic_converter.get_name());
             println!(
                 "Original request body: {}",
                 String::from_utf8_lossy(&ctx.req_buffer)

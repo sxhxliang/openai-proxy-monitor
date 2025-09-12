@@ -2,7 +2,7 @@ use http::{HeaderMap, header::HeaderValue}; // http::HeaderMap<HeaderValue>
 use serde_json::Value;
 
 // 定义API服务枚举
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone,PartialEq)]
 pub enum ApiService {
     Google,
     OpenAI,
@@ -22,7 +22,7 @@ impl ApiService {
 }
 
 // 定义存储解析结果的结构体
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiRequest {
     pub service: ApiService,
     pub api_key: Option<String>,
