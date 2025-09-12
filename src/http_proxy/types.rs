@@ -19,6 +19,8 @@ pub struct Ctx {
     pub(super) openai_request: Option<OpenAIRequest>,
     pub(super) user: String,
     pub(super) api_service: Option<ApiService>,
+    pub(super) upstream_service: Option<ApiService>,
+    pub(super) selected_peer: Option<Peer>,
 }
 
 #[derive(Clone)]
@@ -87,3 +89,20 @@ pub(super) struct TokenUsage {
     pub(super) completion_tokens: u64,
 }
 
+// Routing table entry mapping a model prefix to an upstream peer and protocol
+#[derive(Clone)]
+pub(super) struct RoutingRule {
+    pub(super) model_prefix: &'static str,
+    pub(super) peer: Peer,
+    pub(super) upstream_service: ApiService,
+}
+
+impl Clone for Peer {
+    fn clone(&self) -> Self {
+        Self {
+            tls: self.tls,
+            addr: self.addr,
+            port: self.port,
+        }
+    }
+}

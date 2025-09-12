@@ -3,6 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::Uri;
+use std::str::FromStr;
 use log::info;
 use pingora::prelude::{ProxyHttp, Session};
 use pingora_core::prelude::HttpPeer;
@@ -32,18 +33,22 @@ where
             openai_request: None,
             user: String::new(),
             api_service: None,
+            upstream_service: None,
+            selected_peer: None,
         }
     }
 
     async fn upstream_peer(
         &self,
         _: &mut Session,
-        _: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> pingora_error::Result<Box<HttpPeer>> {
+        // Prefer selected peer from routing; fallback to default peer
+        let selected = ctx.selected_peer.clone().unwrap_or_else(|| self.peer.clone());
         let peer = Box::new(HttpPeer::new(
-            (self.peer.addr, self.peer.port),
-            self.peer.tls,
-            self.peer.addr.to_string(),
+            (selected.addr, selected.port),
+            selected.tls,
+            selected.addr.to_string(),
         ));
         Ok(peer)
     }
@@ -66,41 +71,61 @@ where
         );
         println!("Parsed Request: {:?}", res);
         ctx.api_service = Some(res.service.clone());
-        match res.service {
-            crate::utils::ApiService::Anthropic => {
-                session
-                    .req_header_mut()
-                    .set_uri(Uri::from_static("/v1/chat/completions"));
-                session.req_header_mut().insert_header(
-                    "Authorization",
-                    format!("Bearer {}", res.api_key.unwrap_or("".to_string())),
-                );
+
+        // Choose upstream by model using routing rules
+        if let Some(model) = &res.model {
+            if let Some(rule) = self
+                .routing
+                .iter()
+                .find(|r| model.starts_with(r.model_prefix))
+            {
+                ctx.selected_peer = Some(rule.peer.clone());
+                ctx.upstream_service = Some(rule.upstream_service.clone());
             }
-            crate::utils::ApiService::OpenAI => {
-                session
-                    .req_header_mut()
-                    .set_uri(Uri::from_static("/v1/chat/completions"));
-                session.req_header_mut().insert_header(
-                    "Authorization",
-                    format!("Bearer {}", res.api_key.unwrap_or("".to_string())),
-                );
+        }
+
+        // Default to configured OpenAI peer/protocol if no routing matched
+        if ctx.selected_peer.is_none() {
+            ctx.selected_peer = Some(self.peer.clone());
+            ctx.upstream_service = Some(crate::utils::ApiService::OpenAI);
+        }
+
+        // Set auth header suitable for upstream protocol (if api key present)
+        if let Some(api_key) = res.api_key {
+            match ctx.upstream_service.as_ref().unwrap() {
+                crate::utils::ApiService::Anthropic => {
+                    session
+                        .req_header_mut()
+                        .insert_header("x-api-key", api_key)?;
+                    // Anthropic messages endpoint
+                    session
+                        .req_header_mut()
+                        .set_uri(Uri::from_static("/v1/messages"));
+                }
+                crate::utils::ApiService::OpenAI => {
+                    session.req_header_mut().insert_header(
+                        "Authorization",
+                        format!("Bearer {}", api_key),
+                    )?;
+                    session
+                        .req_header_mut()
+                        .set_uri(Uri::from_static("/v1/chat/completions"));
+                }
+                crate::utils::ApiService::Google => {
+                    // Prefer x-goog-api-key; many clients also accept Bearer
+                    session
+                        .req_header_mut()
+                        .insert_header("x-goog-api-key", api_key)?;
+                    // If model known, route to generateContent for that model
+                    if let Some(model) = &res.model {
+                        let path = format!("/v1beta/models/{}:generateContent", model);
+                        session.req_header_mut().set_uri(Uri::from_str(&path).unwrap_or(Uri::from_static("/v1beta/models/gemini-pro:generateContent")));
+                    }
+                }
+                _ => {
+                    return Err(Error::explain(HTTPStatus(400), "Unsupported API service"));
+                }
             }
-            crate::utils::ApiService::Google => {
-                session
-                    .req_header_mut()
-                    .set_uri(Uri::from_static("/v1/chat/completions"));
-                session.req_header_mut().insert_header(
-                    "Authorization",
-                    format!("Bearer {}", res.api_key.unwrap_or("".to_string())),
-                );
-            }
-            _ => {
-                return Err(Error::explain(
-                    HTTPStatus(400),
-                    "Unsupported API service",
-                ));
-            }
-            
         }
 
         println!("Origin Request Path: {:#?}", session.req_header());
@@ -125,19 +150,23 @@ where
             let path = session.req_header().uri.path();
             ctx.openai_request = Some(self.parse_request(&ctx.req_buffer, path)?);
 
-            let anthropic_converter =
+            let source_converter =
                 ConverterFactory::get_converter(ctx.api_service.clone().unwrap().as_str()).unwrap();
-            println!("Using converter for service: {}", anthropic_converter.get_name());
+            println!("Using converter for source service: {}", source_converter.get_name());
             println!(
                 "Original request body: {}",
                 String::from_utf8_lossy(&ctx.req_buffer)
             );
             let json_value: serde_json::Value = serde_json::from_slice(&ctx.req_buffer)
                 .map_err(|e| Error::explain(HTTPStatus(400), format!("Invalid JSON: {}", e)))?;
+            // Convert from original protocol to the chosen upstream protocol
+            let target = ctx
+                .upstream_service
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("openai");
             let res: Result<ConversionResult, ai_api_converter::ConversionError> =
-                anthropic_converter
-                    .convert_request(json_value, "openai", None)
-                    .await;
+                source_converter.convert_request(json_value, target, None).await;
             match res {
                 Ok(conversion_result) => {
                     let json_str = serde_json::to_string(&conversion_result.data.unwrap())
@@ -171,7 +200,12 @@ where
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()> {
-        upstream_request.insert_header("Host", self.peer.addr)?;
+        let host = ctx
+            .selected_peer
+            .as_ref()
+            .map(|p| p.addr)
+            .unwrap_or(self.peer.addr);
+        upstream_request.insert_header("Host", host)?;
         upstream_request.insert_header("Content-Type", "application/json")?;
 
         ctx.user = session
@@ -219,43 +253,67 @@ where
             let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
             if let Some(model) = json_value.get("model") {
+                // Convert response chunks from upstream protocol back to client's original protocol
+                let original = ctx.api_service.clone().unwrap_or(crate::utils::ApiService::Unknown);
+                let upstream = ctx
+                    .upstream_service
+                    .clone()
+                    .unwrap_or(crate::utils::ApiService::OpenAI);
 
-                let res = if let Some(service_name) = &ctx.api_service {
-                    match service_name {
-                        crate::utils::ApiService::Anthropic => {
-                            let converter = AnthropicConverter::new();
-                            let _ = converter.set_original_model(&model.to_string());
-                            converter.convert_from_openai_streaming_chunk(json_value)
-                        },
-                        crate::utils::ApiService::OpenAI => {
-                            let converter = OpenAIConverter::new();
-                            let _ = converter.set_original_model(&model.to_string());
-                            converter.convert_from_openai_streaming_chunk(json_value)
-                        },
-                        crate::utils::ApiService::Google => {
-                            let converter = GeminiConverter::new();
-                            let _ = converter.set_original_model(&model.to_string());
-                            converter.convert_from_openai_streaming_chunk(json_value)
-                        },
-                        _ => {
-                            println!("Unsupported service for response processing");
-                            Err(ai_api_converter::ConversionError::UnsupportedFormat(service_name.as_str().to_string()))
+                let result: Result<Option<String>, ai_api_converter::ConversionError> = match upstream {
+                    // If upstream is OpenAI, we can convert to client protocol using available converters
+                    crate::utils::ApiService::OpenAI => {
+                        let conv_res = match original {
+                            crate::utils::ApiService::Anthropic => {
+                                let converter = AnthropicConverter::new();
+                                let _ = converter.set_original_model(&model.to_string());
+                                converter.convert_from_openai_streaming_chunk(json_value)
+                            }
+                            crate::utils::ApiService::OpenAI => {
+                                let converter = OpenAIConverter::new();
+                                let _ = converter.set_original_model(&model.to_string());
+                                converter.convert_from_openai_streaming_chunk(json_value)
+                            }
+                            crate::utils::ApiService::Google => {
+                                let converter = GeminiConverter::new();
+                                let _ = converter.set_original_model(&model.to_string());
+                                converter.convert_from_openai_streaming_chunk(json_value)
+                            }
+                            _ => Err(ai_api_converter::ConversionError::UnsupportedFormat(
+                                original.as_str().to_string(),
+                            )),
+                        };
+                        match conv_res {
+                            Ok(conversion_result) => {
+                                if let Some(serde_json::Value::String(s)) = conversion_result.data {
+                                    Ok(Some(s))
+                                } else {
+                                    Ok(None)
+                                }
+                            }
+                            Err(e) => Err(e),
                         }
                     }
-                } else {
-                    Err(ai_api_converter::ConversionError::UnsupportedFormat("Unknown".to_string()))
+                    // If upstream equals original, passthrough
+                    u if u == original => Ok(None),
+                    // Other upstream protocols are not yet supported for conversion
+                    _ => {
+                        println!(
+                            "Upstream protocol {:?} to {:?} conversion not supported; passthrough",
+                            upstream.as_str(),
+                            original.as_str()
+                        );
+                        Ok(None)
+                    }
                 };
 
-
-                match res {
-                    Ok(convertion_result) => {
-                        println!("Converted response: {:?}", convertion_result);
-                        if let Some(data) = convertion_result.data
-                            && let serde_json::Value::String(str_data) = data
-                        {
-                            println!("Converted JSON string:\n{}", str_data);
-                            *body = Some(Bytes::from(str_data));
-                        }
+                match result {
+                    Ok(Some(str_data)) => {
+                        println!("Converted JSON string:\n{}", str_data);
+                        *body = Some(Bytes::from(str_data));
+                    }
+                    Ok(None) => {
+                        // passthrough
                     }
                     Err(e) => {
                         eprintln!("Error during response conversion: {}", e);
@@ -309,4 +367,3 @@ where
         );
     }
 }
-
