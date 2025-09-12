@@ -77,7 +77,10 @@ pub fn parse_request_via_path_and_header(
 
     // 如果独特Header不存在，则根据Path进行分析
     // Google Path 特征: /models/gemini-pro:generateContent
-    if path.contains(":generateContent") || path.contains(":embedContent") || path.contains(":batchEmbedContents") {
+    if path.contains(":generateContent")
+        || path.contains(":embedContent")
+        || path.contains(":batchEmbedContents")
+    {
         let api_key = extract_bearer_token(headers);
         let model = extract_model_from_path_or_body(path, body);
         return ApiRequest::new(ApiService::Google, api_key, model);
@@ -89,11 +92,11 @@ pub fn parse_request_via_path_and_header(
         let model = extract_model_from_body(body);
         return ApiRequest::new(ApiService::OpenAI, api_key, model);
     }
-    
+
     // Anthropic Path 特征 (作为备用)
     if path.contains("/v1/messages") {
-         // 此时 x-api-key 不存在，但路径匹配
-        let api_key = extract_bearer_token(headers); 
+        // 此时 x-api-key 不存在，但路径匹配
+        let api_key = extract_bearer_token(headers);
         let model = extract_model_from_body(body);
         return ApiRequest::new(ApiService::Anthropic, api_key, model);
     }
@@ -107,10 +110,7 @@ fn extract_model_from_body(body: Option<&str>) -> Option<String> {
     body.and_then(|body_str| {
         serde_json::from_str::<Value>(body_str)
             .ok()
-            .and_then(|json| {
-                json.get("model")
-                    .and_then(|v| v.as_str().map(String::from))
-            })
+            .and_then(|json| json.get("model").and_then(|v| v.as_str().map(String::from)))
     })
 }
 
@@ -123,10 +123,10 @@ fn extract_model_from_path_or_body(path: &str, body: Option<&str>) -> Option<Str
     // 否则尝试从path中获取
     // 路径格式: /v1beta/models/gemini-1.5-flash:generateContent
     let segments: Vec<&str> = path.split('/').collect();
-    if let Some(models_pos) = segments.iter().position(|&s| s == "models") {
-        if let Some(model_segment) = segments.get(models_pos + 1) {
-            return model_segment.split(':').next().map(String::from);
-        }
+    if let Some(models_pos) = segments.iter().position(|&s| s == "models")
+        && let Some(model_segment) = segments.get(models_pos + 1)
+    {
+        return model_segment.split(':').next().map(String::from);
     }
     None
 }

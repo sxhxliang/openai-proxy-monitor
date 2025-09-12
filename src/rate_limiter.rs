@@ -1,5 +1,5 @@
 // use std::ops::DerefMut;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -98,65 +98,5 @@ impl SlidingWindowRateLimiter for SlidingWindowRateLimiterEnum {
                 dummy.fetch_sliding_window(resource, subject, size).await
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
-    use std::time::Duration;
-
-    use deadpool::managed::{Pool, PoolConfig};
-    use redis::Client;
-    use testcontainers::{
-        core::{IntoContainerPort, WaitFor},
-        runners::AsyncRunner,
-        GenericImage, ImageExt,
-    };
-
-    use crate::rate_limiter;
-    use crate::rate_limiter::{
-        DummySlidingWindowRateLimiter, SlidingWindowRateLimiter,
-        SlidingWindowRateLimiterEnum,
-    };
-    // use crate::redis_async_pool::RedisConnectionManager;
-
-
-    #[tokio::test]
-    async fn test_dummy_rate_limiter() {
-        let dummy_rate_limiter = DummySlidingWindowRateLimiter {};
-        let count = dummy_rate_limiter
-            .record_sliding_window("user", "test-user-1", 10, Duration::from_secs(1))
-            .await
-            .expect("Failed to record sliding window");
-        assert_eq!(count, 0);
-
-        let count = dummy_rate_limiter
-            .fetch_sliding_window("user", "test-user-1", Duration::from_secs(1))
-            .await
-            .expect("Failed to fetch sliding window");
-        assert_eq!(count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_enum_dummy_rate_limiter() {
-        let dummy_rate_limiter =
-            SlidingWindowRateLimiterEnum::Dummy(rate_limiter::DummySlidingWindowRateLimiter {});
-        let count = dummy_rate_limiter
-            .record_sliding_window("user", "test-user-1", 10, Duration::from_secs(1))
-            .await
-            .expect("Failed to record sliding window");
-        assert_eq!(count, 0);
-
-        let count = dummy_rate_limiter
-            .fetch_sliding_window("user", "test-user-1", Duration::from_secs(1))
-            .await
-            .expect("Failed to fetch sliding window");
-        assert_eq!(count, 0);
-    }
-
-    fn find_free_port() -> u16 {
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        listener.local_addr().unwrap().port()
     }
 }

@@ -4,9 +4,9 @@ use clap::Parser;
 use pingora::prelude::*;
 use tiktoken_rs::cl100k_base;
 
-use http_proxy::{HttpGateway, HttpGatewayConfig};
 use crate::http_proxy::{OpenAIConfig, RateLimitingConfig};
 use crate::rate_limiter::SlidingWindowRateLimiterEnum;
+use http_proxy::{HttpGateway, HttpGatewayConfig};
 
 mod http_proxy;
 mod rate_limiter;
@@ -16,38 +16,42 @@ mod utils;
 #[command(author, version, about, long_about = None)]
 struct Args {
     // OpenAI configuration
-    #[arg(long, help = "Enable TLS for OpenAI endpoints", default_value_t = true, env)]
+    #[arg(
+        long,
+        help = "Enable TLS for OpenAI endpoints",
+        default_value_t = true,
+        env
+    )]
     openai_tls: bool,
-    
+
     #[arg(long, help = "OpenAI endpoint port", default_value_t = 443, env)]
     openai_port: u16,
-    
-    #[arg(long, help = "OpenAI endpoint domain", default_value = "api.openai.com", env)]
+
+    #[arg(
+        long,
+        help = "OpenAI endpoint domain",
+        default_value = "api.openai.com",
+        env
+    )]
     openai_domain: String,
 
     // Proxy configuration
     #[arg(long, help = "HTTP proxy port", default_value = "8080", env)]
     proxy_port: String,
-    
+
     #[arg(long, help = "Metrics port", default_value = "9090", env)]
     metrics_port: String,
 
-    // Rate limiting configuration  
+    // Rate limiting configuration
     #[arg(long, help = "Enable rate limiting", default_value_t = false, env)]
     enable_rate_limiting: bool,
-    
-    #[arg(long, help = "Redis connection string", default_value = "redis://127.0.0.1:6379/0", env)]
-    redis_url: String,
-    
-    #[arg(long, help = "Redis pool size", default_value_t = 5, env)]
-    redis_pool_size: usize,
-    
+
     #[arg(long, help = "Rate limit window (minutes)", default_value_t = 60, env)]
     rate_limit_window_min: u64,
-    
+
     #[arg(long, help = "Max tokens per window", default_value_t = 1000, env)]
     max_tokens: u64,
-    
+
     #[arg(long, help = "User header key", default_value = "user", env)]
     user_header: String,
 }
@@ -80,8 +84,9 @@ impl Args {
 }
 
 fn create_gateway(args: &Args) -> anyhow::Result<HttpGateway<SlidingWindowRateLimiterEnum>> {
-    let tokenizer = cl100k_base().map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
-    
+    let tokenizer =
+        cl100k_base().map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
     let config = HttpGatewayConfig {
         openai_config: args.create_openai_config(),
         tokenizer,
@@ -109,7 +114,7 @@ fn setup_services(server: &mut Server, args: &Args) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    
+
     // Initialize logging
     env_logger::init();
 
