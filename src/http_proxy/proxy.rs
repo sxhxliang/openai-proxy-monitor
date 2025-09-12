@@ -10,7 +10,7 @@ use pingora_error::{Error, ErrorType::HTTPStatus};
 use pingora_http::{RequestHeader, ResponseHeader};
 use serde_json::from_slice;
 
-use ai_api_converter::{AnthropicConverter, BaseConverter, ConversionResult, ConverterFactory};
+use ai_api_converter::{AnthropicConverter, BaseConverter, ConversionResult, ConverterFactory, GeminiConverter, OpenAIConverter};
 
 use crate::utils::parse_request_via_path_and_header;
 
@@ -219,9 +219,33 @@ where
             let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
             if let Some(model) = json_value.get("model") {
-                let anthropic_converter = AnthropicConverter::new();
-                let _ = anthropic_converter.set_original_model(&model.to_string());
-                let res = anthropic_converter.convert_from_openai_streaming_chunk(json_value);
+
+                let res = if let Some(service_name) = &ctx.api_service {
+                    match service_name {
+                        crate::utils::ApiService::Anthropic => {
+                            let converter = AnthropicConverter::new();
+                            let _ = converter.set_original_model(&model.to_string());
+                            converter.convert_from_openai_streaming_chunk(json_value)
+                        },
+                        crate::utils::ApiService::OpenAI => {
+                            let converter = OpenAIConverter::new();
+                            let _ = converter.set_original_model(&model.to_string());
+                            converter.convert_from_openai_streaming_chunk(json_value)
+                        },
+                        crate::utils::ApiService::Google => {
+                            let converter = GeminiConverter::new();
+                            let _ = converter.set_original_model(&model.to_string());
+                            converter.convert_from_openai_streaming_chunk(json_value)
+                        },
+                        _ => {
+                            println!("Unsupported service for response processing");
+                            Err(ai_api_converter::ConversionError::UnsupportedFormat(service_name.as_str().to_string()))
+                        }
+                    }
+                } else {
+                    Err(ai_api_converter::ConversionError::UnsupportedFormat("Unknown".to_string()))
+                };
+
 
                 match res {
                     Ok(convertion_result) => {
