@@ -125,4 +125,3 @@ pub(super) fn extract_json_from_sse(sse_data: &str) -> Option<String> {
     }
     None
 }
-

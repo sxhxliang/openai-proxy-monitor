@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use prometheus::{register_counter_vec, register_int_counter, CounterVec, IntCounter};
+use prometheus::{CounterVec, IntCounter, register_counter_vec, register_int_counter};
 
 use super::types::TokenUsage;
 
@@ -30,12 +30,8 @@ impl GatewayMetrics {
                 register_int_counter!("tokens_total", "Total tokens").unwrap(),
             )),
             tokens_by_model: Box::leak(Box::new(
-                register_counter_vec!(
-                    "tokens_by_model",
-                    "Tokens by model",
-                    &["model", "type"]
-                )
-                .unwrap(),
+                register_counter_vec!("tokens_by_model", "Tokens by model", &["model", "type"])
+                    .unwrap(),
             )),
             tokens_by_user_model: Box::leak(Box::new(
                 register_counter_vec!(

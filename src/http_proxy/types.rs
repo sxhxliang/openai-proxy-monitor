@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 use crate::utils::ApiService;
 
@@ -6,6 +7,7 @@ use crate::utils::ApiService;
 pub(super) const USER_RESOURCE: &str = "user";
 
 // Peer config used by upstream connector
+#[derive(Debug)]
 pub(super) struct Peer {
     pub(super) tls: bool,
     pub(super) addr: &'static str,
@@ -21,6 +23,10 @@ pub struct Ctx {
     pub(super) api_service: Option<ApiService>,
     pub(super) upstream_service: Option<ApiService>,
     pub(super) selected_peer: Option<Peer>,
+    pub(super) selected_channel: Option<String>, // 选中的渠道ID
+    pub(super) api_key_hash: Option<String>,     // API Key的哈希值
+    pub(super) routing_attempts: u32,            // 路由尝试次数
+    pub(super) fallback_used: bool,              // 是否使用了备用渠道
 }
 
 #[derive(Clone)]
@@ -105,4 +111,55 @@ impl Clone for Peer {
             port: self.port,
         }
     }
+}
+
+// API Key到渠道的映射配置
+#[derive(Clone, Debug)]
+pub(super) struct ApiKeyMapping {
+    pub(super) api_key_hash: String, // API Key的哈希值，用于安全匹配
+    pub(super) channel_id: String,   // 渠道标识符
+    pub(super) peer: Peer,           // 目标服务器配置
+    pub(super) service: ApiService,  // 目标API服务类型
+    pub(super) weight: u32,          // 负载均衡权重
+    pub(super) enabled: bool,        // 是否启用
+}
+
+// 渠道配置，支持多个API Key映射到同一个渠道
+#[derive(Clone, Debug)]
+pub(super) struct ChannelConfig {
+    pub(super) channel_id: String,
+    pub(super) name: String,
+    pub(super) peer: Peer,
+    pub(super) service: ApiService,
+    pub(super) weight: u32,
+    pub(super) enabled: bool,
+    pub(super) api_keys: Vec<String>, // 绑定到此渠道的API Key哈希列表
+}
+
+// 智能路由配置 - 扩展原有的RoutingRule
+#[derive(Clone, Debug)]
+pub(super) struct SmartRoutingRule {
+    pub(super) rule_id: String,
+    pub(super) model_patterns: Vec<String>, // 支持多个模型匹配模式
+    pub(super) channels: Vec<String>,       // 候选渠道列表
+    pub(super) load_balance_strategy: LoadBalanceStrategy,
+    pub(super) fallback_channels: Vec<String>, // 失败时的备用渠道
+    pub(super) enabled: bool,
+}
+
+// 负载均衡策略
+#[derive(Clone, Debug)]
+pub(super) enum LoadBalanceStrategy {
+    RoundRobin,       // 轮询
+    WeightedRandom,   // 加权随机
+    LeastConnections, // 最少连接数
+    FailoverOnly,     // 仅故障转移
+}
+
+// API Key缓存管理器
+#[derive(Debug)]
+pub(super) struct ApiKeyCache {
+    pub(super) key_to_channel: HashMap<String, String>, // API Key hash -> Channel ID
+    pub(super) channel_configs: HashMap<String, ChannelConfig>,
+    pub(super) routing_rules: Vec<SmartRoutingRule>,
 }
