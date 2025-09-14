@@ -42,24 +42,6 @@ where
         }
     }
 
-    async fn upstream_peer(
-        &self,
-        _: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> pingora_error::Result<Box<HttpPeer>> {
-        // 优先使用智能路由选择的peer，回退到默认peer
-        let selected = ctx
-            .selected_peer
-            .clone()
-            .unwrap_or_else(|| self.peer.clone());
-        let peer = Box::new(HttpPeer::new(
-            (selected.addr, selected.port),
-            selected.tls,
-            selected.addr.to_string(),
-        ));
-        Ok(peer)
-    }
-
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -127,6 +109,53 @@ where
         Ok(false)
     }
 
+
+    async fn upstream_peer(
+        &self,
+        _: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora_error::Result<Box<HttpPeer>> {
+        // 优先使用智能路由选择的peer，回退到默认peer
+        let selected = ctx
+            .selected_peer
+            .clone()
+            .unwrap_or_else(|| self.peer.clone());
+        let peer = Box::new(HttpPeer::new(
+            (selected.addr, selected.port),
+            selected.tls,
+            selected.addr.to_string(),
+        ));
+        Ok(peer)
+    }
+
+
+    async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora_error::Result<()> {
+        let host = ctx
+            .selected_peer
+            .as_ref()
+            .map(|p| p.addr)
+            .unwrap_or(self.peer.addr);
+        upstream_request.insert_header("Host", host)?;
+        upstream_request.insert_header("Content-Type", "application/json")?;
+
+        ctx.user = session
+            .req_header()
+            .headers
+            .get(self.rate_config.user_header_key)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        self.check_rate_limit(&ctx.user).await?;
+        Ok(())
+    }
+
+
     async fn request_body_filter(
         &self,
         session: &mut Session,
@@ -172,32 +201,6 @@ where
             }
         }
 
-        Ok(())
-    }
-
-    async fn upstream_request_filter(
-        &self,
-        session: &mut Session,
-        upstream_request: &mut RequestHeader,
-        ctx: &mut Self::CTX,
-    ) -> pingora_error::Result<()> {
-        let host = ctx
-            .selected_peer
-            .as_ref()
-            .map(|p| p.addr)
-            .unwrap_or(self.peer.addr);
-        upstream_request.insert_header("Host", host)?;
-        upstream_request.insert_header("Content-Type", "application/json")?;
-
-        ctx.user = session
-            .req_header()
-            .headers
-            .get(self.rate_config.user_header_key)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-
-        self.check_rate_limit(&ctx.user).await?;
         Ok(())
     }
 
