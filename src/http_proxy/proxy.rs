@@ -289,7 +289,7 @@ where
 
         if let Some(encoding) = decode_body(ctx, body) {
             let data = String::from_utf8_lossy(&encoding).to_string();
-            info!("处理流式响应 Upstream response chunk: {}", data);
+            // info!("处理流式响应 Upstream response chunk: {}", data);
             // 处理流式响应
             if self.is_streaming_response(&data) {
                 if let Ok(Some(converted_data)) = self.convert_streaming_response(&data, ctx) {
