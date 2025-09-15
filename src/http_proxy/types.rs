@@ -5,7 +5,6 @@ use crate::utils::ApiService;
 
 // Internal constant
 pub(super) const USER_RESOURCE: &str = "user";
-
 // Peer config used by upstream connector
 #[derive(Debug)]
 pub(super) struct Peer {
@@ -27,6 +26,8 @@ pub struct Ctx {
     pub(super) api_key_hash: Option<String>,     // API Key的哈希值
     pub(super) routing_attempts: u32,            // 路由尝试次数
     pub(super) fallback_used: bool,              // 是否使用了备用渠道
+    /// Custom variables available to plugins.
+    pub vars: HashMap<String, String>,
 }
 
 #[derive(Clone)]

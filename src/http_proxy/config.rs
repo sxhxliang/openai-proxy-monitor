@@ -136,6 +136,7 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> HttpGateway<R> {
     }
 
     pub(super) fn calculate_tokens(&self, text: &str) -> usize {
+        print!("{}", text);
         self.tokenizer.encode_with_special_tokens(text).len()
     }
 

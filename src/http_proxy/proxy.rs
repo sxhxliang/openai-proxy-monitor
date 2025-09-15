@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::Uri;
 use log::info;
+use pingora::modules::http::compression::ResponseCompressionBuilder;
+use pingora::modules::http::HttpModules;
 use pingora::prelude::{ProxyHttp, Session};
 use pingora_core::prelude::HttpPeer;
 use pingora_error::{Error, ErrorType::HTTPStatus};
@@ -13,11 +15,13 @@ use std::str::FromStr;
 
 use ai_api_converter::{AnthropicConverter, BaseConverter, ConverterFactory, GeminiConverter, OpenAIConverter};
 
+use crate::http_proxy::code_body::decode_body;
 use crate::utils::parse_request_via_path_and_header;
 
 use super::config::HttpGateway;
 use super::parsing::extract_json_from_sse;
 use super::types::{Ctx, RequestType, TokenUsage, UsageResponse};
+use http::header::CONTENT_ENCODING;
 
 #[async_trait]
 impl<R> ProxyHttp for HttpGateway<R>
@@ -39,7 +43,15 @@ where
             api_key_hash: None,
             routing_attempts: 0,
             fallback_used: false,
+            vars: std::collections::HashMap::new(),
         }
+    }
+    /// Set up downstream modules.
+    ///
+    /// set up [ResponseCompressionBuilder] for gzip and brotli compression.
+    fn init_downstream_modules(&self, modules: &mut HttpModules) {
+        // Add disabled downstream compression module by default
+        modules.add_module(ResponseCompressionBuilder::enable(0));
     }
 
     async fn request_filter(
@@ -58,7 +70,7 @@ where
                 .as_ref()
                 .map(|b| std::str::from_utf8(b).unwrap_or("")),
         );
-        println!("Parsed Request: {:?}", res);
+        info!("Parsed Request: {:?}", res);
         ctx.api_service = Some(res.service.clone());
 
         // 智能路由选择
@@ -70,7 +82,7 @@ where
                 ctx.selected_peer = Some(channel_config.peer.clone());
                 ctx.upstream_service = Some(channel_config.service.clone());
                 ctx.selected_channel = Some(channel_config.channel_id.clone());
-                println!("Selected channel: {}", channel_config.name);
+                info!("Selected channel: {}", channel_config.name);
             }
         }
 
@@ -102,7 +114,7 @@ where
             return Err(Error::explain(HTTPStatus(401), "Missing API key"));
         }
 
-        println!(
+        info!(
             "Request configured for upstream: {:?}",
             ctx.upstream_service
         );
@@ -125,6 +137,7 @@ where
             selected.tls,
             selected.addr.to_string(),
         ));
+        info!("Upstream peer selected: {:?}", selected);
         Ok(peer)
     }
 
@@ -142,7 +155,12 @@ where
             .unwrap_or(self.peer.addr);
         upstream_request.insert_header("Host", host)?;
         upstream_request.insert_header("Content-Type", "application/json")?;
-
+        upstream_request.remove_header("Accept-Encoding");
+        upstream_request.insert_header("Accept-Encoding", "identity")?;
+        info!(
+            "Upstream request headers: {:#?}",
+            session.req_header()
+        );
         ctx.user = session
             .req_header()
             .headers
@@ -150,7 +168,7 @@ where
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-
+        
         self.check_rate_limit(&ctx.user).await?;
         Ok(())
     }
@@ -166,9 +184,11 @@ where
         if let Some(b) = body {
             ctx.req_buffer.extend_from_slice(b);
         }
+        
 
         if end_of_stream && session.req_header().method == "POST" {
             let path = session.req_header().uri.path();
+            info!("reqest path: {:#?}", session.req_header());
             ctx.openai_request = Some(self.parse_request(&ctx.req_buffer, path)?);
 
             let source_service = ctx
@@ -182,13 +202,13 @@ where
 
             // 如果源服务和目标服务相同，直接透传
             if source_service == target_service {
-                println!("Source and target services are the same, passing through");
+                info!("Source and target services are the same, passing through");
                 return Ok(());
             }
 
             // 执行格式转换
             if let Ok(converted_data) =
-                self.convert_request_format(&ctx.req_buffer, &source_service, &target_service)
+                self.convert_request_format(&ctx.req_buffer, &source_service, &target_service).await
             {
                 session
                     .req_header_mut()
@@ -197,24 +217,64 @@ where
                     .req_header_mut()
                     .insert_header("Content-Length", converted_data.len().to_string())?;
                 *body = Some(Bytes::from(converted_data));
-                println!("Request conversion completed successfully");
+                info!("Request conversion completed successfully");
             }
         }
 
         Ok(())
     }
 
-    async fn response_filter(
+        /// Filters the upstream response body.
+    /// This method is called after the response body is received from the upstream.
+    /// It decodes the response body if it is encoded.
+    // fn upstream_response_body_filter(
+    //     &self,
+    //     session: &mut Session,
+    //     body: &mut Option<Bytes>,
+    //     end_of_stream: bool,
+    //     ctx: &mut Self::CTX,
+    // ) -> Result<()> {
+    //     // 警告：此函数会将整个上游响应体缓冲在内存中的 `ctx.body_buffer` 中，
+    //     // 直到 `end_of_stream` 为 true。对于大型响应，这可能导致高内存消耗和
+    //     // 潜在的 OOM (Out Of Memory) 错误。这种方法抵消了流式处理大负载的优势。
+    //     // 如果需要真正的大型主体流式传输，请考虑重新设计此部分。
+    //            // Log only the size of the body to avoid exposing sensitive data
+    //     if let Some(b) = body {
+    //         log::debug!("upstream body size: {}", b.len());
+    //         ctx.body_buffer.push(b.clone());
+    //         // drop the body
+    //         b.clear();
+    //     } else {
+    //         log::debug!("upstream response Body is None");
+    //     }
+    // }
+    
+     async fn response_filter(
         &self,
         _: &mut Session,
         upstream_response: &mut ResponseHeader,
-        _: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()> {
+
         if upstream_response.status.as_u16() != 200 {
             return Err(Error::explain(
                 HTTPStatus(upstream_response.status.as_u16()),
                 "Upstream error",
             ));
+        }
+
+        // get content encoding,
+        // will be used to decompress the response body in the upstream_response_body_filter phase
+        // see details in the upstream_response_body_filter function
+        if let Some(encoding) = upstream_response.headers.get(CONTENT_ENCODING) {
+            log::info!("Content-Encoding: {:?}", encoding.to_str());
+            log::info!("upstream_response.headers: {:?}", upstream_response.headers);
+            // insert content-encoding to ctx.vars
+            // will be used in the upstream_response_body_filter phase
+            ctx.vars.insert(
+                CONTENT_ENCODING.to_string(),
+                encoding.to_str().unwrap().to_string(),
+            );
         }
         Ok(())
     }
@@ -226,17 +286,21 @@ where
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<Option<Duration>> {
-        if let Some(b) = body {
-            ctx.resp_buffer.extend_from_slice(b);
-            let data = String::from_utf8_lossy(b).to_string();
 
+        if let Some(encoding) = decode_body(ctx, body) {
+            let data = String::from_utf8_lossy(&encoding).to_string();
+            info!("处理流式响应 Upstream response chunk: {}", data);
             // 处理流式响应
             if self.is_streaming_response(&data) {
                 if let Ok(Some(converted_data)) = self.convert_streaming_response(&data, ctx) {
                     *body = Some(Bytes::from(converted_data));
                 }
             }
+        } else {
+            log::warn!("No body to decode");
         }
+
+
 
         if end_of_stream {
             // 处理使用量统计
@@ -318,7 +382,7 @@ where
     }
 
     /// 转换请求格式
-    fn convert_request_format(
+    async fn convert_request_format(
         &self,
         buffer: &[u8],
         source_service: &crate::utils::ApiService,
@@ -327,15 +391,9 @@ where
         let json_value: serde_json::Value = serde_json::from_slice(buffer)?;
         let source_converter = ConverterFactory::get_converter(source_service.as_str())?;
 
-        // 执行转换
-        let conversion_result = {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async {
-                source_converter
+        let conversion_result = source_converter
                     .convert_request(json_value, target_service.as_str(), None)
-                    .await
-            })?
-        };
+                    .await?;
 
         if let Some(converted_data) = conversion_result.data {
             Ok(serde_json::to_string(&converted_data)?)
@@ -430,7 +488,7 @@ where
                 },
             };
 
-            println!("Usage: {:?}", usage);
+            info!("Usage: {:?}", usage);
             self.metrics.record(&usage, &req.model, &ctx.user);
 
             let total_tokens = usage.prompt_tokens + usage.completion_tokens;
@@ -443,3 +501,5 @@ where
         }
     }
 }
+
+
